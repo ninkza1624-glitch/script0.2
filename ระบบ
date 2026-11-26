@@ -1,15 +1,17 @@
 --[[
-    ╔═══════════════════════════════════════════════════╗
-    ║   Blox Fruits - Auto Boat v4.1 + Fly + ESP        ║
-    ║   🚢 ขับเรือ v4.1 + 🕊️ บินอิสระ + 👁️ ESP ชื่อคน  ║
-    ╚═══════════════════════════════════════════════════╝
+    ╔═══════════════════════════════════════════════════════════╗
+    ║   Blox Fruits - Auto Boat v4.1 + Fly + ESP (PC & Mobile)  ║
+    ║   🚢 ขับเรือ v4.1 + 🕊️ บินอิสระ + 👁️ ESP + 📱 มือถือ     ║
+    ╚═══════════════════════════════════════════════════════════╝
 
-    - ระบบขับเรือ v4.1 เดิมทั้งหมด (BodyMovers + Network Ownership)
-    - เพิ่มระบบบินอิสระของตัวละคร (WASD ตามมุมกล้อง, Space ขึ้น, LCtrl ลง, Right Shift เปิด/ปิด)
-    - เพิ่มปุ่มเปิด/ปิด ESP ชื่อผู้เล่น (แสดงชื่อ, ทีม, ระยะ, เลือด)
+    - รองรับทั้ง PC (คีย์บอร์ด/เมาส์) และ โทรศัพท์มือถือ (ทัชสกรีน/จอยสติ๊กบนจอ)
+    - ขับเรือ v4.1: WASD / จอยสติ๊กมือถือ + ปุ่ม ขึ้น-ลง บนจอ
+    - บินอิสระ: WASD / จอยสติ๊กมือถือตามมุมกล้อง + Space/LCtrl หรือปุ่ม ขึ้น-ลง บนจอ
+    - หน้าต่างเมนูย่อ/ขยายได้ ลากด้วยนิ้วได้ เลื่อนสกรอลล์พอดีหน้าจอมือถือ
+    - ระบบ ESP ชื่อผู้เล่น + Anti-AFK อัตโนมัติ
 ]]
 
-
+-- ทำความสะอาดรอบก่อนหน้าถ้ารันซ้ำ
 pcall(function()
     if getgenv and getgenv().AB_Cleanup then
         getgenv().AB_Cleanup()
@@ -30,6 +32,8 @@ local isEnabled = false
 local isAutoDrive = false
 local isFlying = false
 local isEspEnabled = false
+local showTouchPad = UIS.TouchEnabled
+
 local mainLoop = nil
 local flyLoop = nil
 local espLoop = nil
@@ -38,6 +42,12 @@ local currentYaw = 0
 local bv, bg, bp = nil, nil, nil
 local flyBV, flyBG = nil, nil
 local held = {}
+local touchHeld = {
+    up = false,
+    down = false,
+    left = false,
+    right = false,
+}
 local globalConns = {}
 local uiRefs = {}
 
@@ -56,6 +66,77 @@ end))
 
 local function pressing(k) return held[k] ~= nil end
 
+local controlModule = nil
+pcall(function()
+    local ps = Player:FindFirstChild("PlayerScripts")
+    local pm = ps and ps:FindFirstChild("PlayerModule")
+    if pm then
+        controlModule = require(pm):GetControls()
+    end
+end)
+
+local function getThumbstickVector()
+    if controlModule then
+        local ok, mv = pcall(function()
+            return controlModule:GetMoveVector()
+        end)
+        if ok and typeof(mv) == "Vector3" then
+            return mv
+        end
+    end
+    return nil
+end
+
+local function resetTouchHeld()
+    touchHeld.up = false
+    touchHeld.down = false
+    touchHeld.left = false
+    touchHeld.right = false
+    if uiRefs.padButtons then
+        for _, info in ipairs(uiRefs.padButtons) do
+            info.btn.BackgroundColor3 = info.idleCol
+        end
+    end
+end
+
+local function updateTouchPadVisibility()
+    if uiRefs.touchPad then
+        uiRefs.touchPad.Visible = showTouchPad and (isEnabled or isFlying)
+    end
+end
+
+local function syncBoatUI()
+    if not uiRefs.tog or not uiRefs.ad or not uiRefs.status then return end
+    if not isEnabled then
+        uiRefs.tog.Text = "🎮  เปิดระบบขับเรือ"
+        uiRefs.tog.BackgroundColor3 = Color3.fromRGB(0, 140, 75)
+        uiRefs.ad.Text = "🧭  Auto Drive (ตรงไปอัตโนมัติ)"
+        uiRefs.ad.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
+        if not isFlying then
+            uiRefs.status.Text = "⏸️  สถานะ: ปิดอยู่"
+            uiRefs.status.TextColor3 = Color3.fromRGB(255, 180, 80)
+        end
+    elseif isAutoDrive then
+        uiRefs.tog.Text = "⏹️  ปิดระบบขับเรือ"
+        uiRefs.tog.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+        uiRefs.ad.Text = "⏹️  ปิด Auto Drive"
+        uiRefs.ad.BackgroundColor3 = Color3.fromRGB(200, 130, 0)
+        uiRefs.status.Text = "🧭  Auto ON | เลี้ยวด้วยจอย/ปุ่มได้"
+        uiRefs.status.TextColor3 = Color3.fromRGB(255, 220, 80)
+    else
+        uiRefs.tog.Text = "⏹️  ปิดระบบขับเรือ"
+        uiRefs.tog.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+        uiRefs.ad.Text = "🧭  Auto Drive (ตรงไปอัตโนมัติ)"
+        uiRefs.ad.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
+        uiRefs.status.Text = "🎮  กำลังขับเรือ (จอย/WASD + ขึ้นลง)"
+        uiRefs.status.TextColor3 = Color3.fromRGB(80, 255, 150)
+    end
+    updateTouchPadVisibility()
+end
+
+-- ============================================
+-- หา Seat + Boat Model (ระบบ v4.1 เดิม)
+-- ============================================
 local function getSeat()
     local char = Player.Character
     if not char then return nil, nil end
@@ -69,6 +150,9 @@ local function getSeat()
     return seat, seat.Parent
 end
 
+-- ============================================
+-- ขอ Network Ownership ทุกชิ้นของเรือ (ระบบ v4.1 เดิม)
+-- ============================================
 local function claimOwnership(boat)
     if not boat then return end
     pcall(function()
@@ -82,7 +166,9 @@ local function claimOwnership(boat)
     end)
 end
 
-
+-- ============================================
+-- ลบ BodyMovers (ระบบ v4.1 เดิม)
+-- ============================================
 local function removeMovers()
     if bv then pcall(game.Destroy, bv); bv = nil end
     if bg then pcall(game.Destroy, bg); bg = nil end
@@ -97,7 +183,9 @@ local function cleanOld(seat)
     end
 end
 
-
+-- ============================================
+-- สร้าง BodyMovers ที่ Seat (ระบบ v4.1 เดิม)
+-- ============================================
 local function createMovers(seat)
     removeMovers()
     cleanOld(seat)
@@ -125,7 +213,9 @@ local function createMovers(seat)
     bp.Parent = seat
 end
 
-
+-- ============================================
+-- เริ่มระบบขับเรือ (ระบบ v4.1 เดิม)
+-- ============================================
 local function startSystem()
     local seat, boat = getSeat()
     if not seat then
@@ -142,6 +232,7 @@ local function startSystem()
     -- ขอ Network Ownership
     claimOwnership(boat)
 
+    -- ลบ constraints ที่เกมใช้ควบคุมเรือ (ป้องกันตีกัน)
     pcall(function()
         for _, v in ipairs(boat:GetDescendants()) do
             if v:IsA("BodyVelocity") or v:IsA("BodyGyro") or v:IsA("BodyPosition")
@@ -174,7 +265,9 @@ local function startSystem()
             isEnabled = false
             isAutoDrive = false
             removeMovers()
+            resetTouchHeld()
             if mainLoop then mainLoop:Disconnect(); mainLoop = nil end
+            syncBoatUI()
             return
         end
 
@@ -183,33 +276,75 @@ local function startSystem()
             createMovers(s)
         end
 
-        -- Q/E ความสูง
-        if pressing(Enum.KeyCode.Q) then
+        -- Q/E หรือปุ่มทัชบนจอ ปรับความสูง
+        if pressing(Enum.KeyCode.Q) or touchHeld.up then
             boatHeight = math.min(5000, boatHeight + 80 * dt)
         end
-        if pressing(Enum.KeyCode.E) then
+        if pressing(Enum.KeyCode.E) or touchHeld.down then
             boatHeight = math.max(-50, boatHeight - 80 * dt)
         end
 
-        -- A/D เลี้ยว
+        -- คำนวณทิศทางกล้องบนระนาบ (สำหรับจอยสติ๊กมือถือ fallback)
+        local char = Player.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        local cam = workspace.CurrentCamera
+        local camFlatLook, camFlatRight = nil, nil
+        if cam then
+            local lv = Vector3.new(cam.CFrame.LookVector.X, 0, cam.CFrame.LookVector.Z)
+            local rv = Vector3.new(cam.CFrame.RightVector.X, 0, cam.CFrame.RightVector.Z)
+            if lv.Magnitude > 0.01 then camFlatLook = lv.Unit end
+            if rv.Magnitude > 0.01 then camFlatRight = rv.Unit end
+        end
+
+        -- A/D หรือปุ่มทัช หรือจอยสติ๊กมือถือ เลี้ยว
+        local thumb = getThumbstickVector()
         local turn = 0
-        if pressing(Enum.KeyCode.A) then turn = turn + 1 end
-        if pressing(Enum.KeyCode.D) then turn = turn - 1 end
+        if pressing(Enum.KeyCode.A) or touchHeld.left then turn = turn + 1 end
+        if pressing(Enum.KeyCode.D) or touchHeld.right then turn = turn - 1 end
+        if turn == 0 then
+            if s:IsA("VehicleSeat") and math.abs(s.SteerFloat or 0) > 0.05 then
+                turn = -(s.SteerFloat or 0)
+            elseif thumb and math.abs(thumb.X) > 0.08 then
+                turn = -thumb.X
+            elseif hum and hum.MoveDirection.Magnitude > 0.1 and camFlatRight then
+                local rDot = hum.MoveDirection:Dot(camFlatRight)
+                if math.abs(rDot) > 0.1 then
+                    turn = -rDot
+                end
+            end
+        end
         currentYaw = currentYaw + turn * turnSpeed * dt
 
         -- BodyGyro — ล็อคให้เรือตั้งตรง + หมุนตาม yaw
         bg.CFrame = CFrame.Angles(0, currentYaw, 0)
 
-        -- W/S ขับ
+        -- W/S หรือจอยสติ๊กมือถือ ขับเดินหน้า/ถอยหลัง
         local fwd = Vector3.new(-math.sin(currentYaw), 0, -math.cos(currentYaw))
         local speed = 0
-        if pressing(Enum.KeyCode.W) or isAutoDrive then speed = boatSpeed end
-        if pressing(Enum.KeyCode.S) then speed = speed - boatSpeed * 0.4 end
+        if pressing(Enum.KeyCode.W) or isAutoDrive then
+            speed = boatSpeed
+        elseif pressing(Enum.KeyCode.S) then
+            speed = -boatSpeed * 0.4
+        elseif s:IsA("VehicleSeat") and math.abs(s.ThrottleFloat or 0) > 0.05 then
+            local tf = s.ThrottleFloat
+            speed = tf > 0 and (boatSpeed * tf) or (boatSpeed * 0.4 * tf)
+        elseif thumb and math.abs(thumb.Z) > 0.08 then
+            local tf = -thumb.Z
+            speed = tf > 0 and (boatSpeed * tf) or (boatSpeed * 0.4 * tf)
+        elseif hum and hum.MoveDirection.Magnitude > 0.1 and camFlatLook then
+            local fDot = hum.MoveDirection:Dot(camFlatLook)
+            if fDot > 0.1 then
+                speed = boatSpeed * fDot
+            elseif fDot < -0.1 then
+                speed = boatSpeed * 0.4 * fDot
+            end
+        end
 
         bv.Velocity = fwd * speed
         bp.Position = Vector3.new(s.Position.X, boatHeight, s.Position.Z)
     end)
 
+    syncBoatUI()
     return true
 end
 
@@ -217,10 +352,12 @@ local function stopSystem()
     isEnabled = false
     isAutoDrive = false
     removeMovers()
+    resetTouchHeld()
     if mainLoop then mainLoop:Disconnect(); mainLoop = nil end
+    syncBoatUI()
 end
 
-
+-- Anti-AFK
 pcall(function()
     local vu = game:GetService("VirtualUser")
     trackConn(Player.Idled:Connect(function()
@@ -230,7 +367,9 @@ pcall(function()
     end))
 end)
 
-
+-- ============================================
+-- GUI Parent
+-- ============================================
 local function guiParent()
     if gethui then return gethui() end
     local ok, c = pcall(function() return game:GetService("CoreGui") end)
@@ -238,7 +377,9 @@ local function guiParent()
     return Player:WaitForChild("PlayerGui")
 end
 
-
+-- ============================================
+-- ระบบ ESP ชื่อผู้เล่น (Drawing API + BillboardGui Fallback)
+-- ============================================
 local hasDrawing = pcall(function()
     local t = Drawing.new("Text")
     if t.Remove then t:Remove() elseif t.Destroy then t:Destroy() end
@@ -318,7 +459,7 @@ local function getPlayerTarget(plr)
         return part, part.Position, hum, true
     end
 
-  
+    -- กรณีอยู่ไกลจนชิ้นส่วนถูก Streaming ถอดออก แต่ Model ยังอยู่
     local ok, pivot = pcall(function() return char:GetPivot() end)
     if ok and pivot and pivot.Position.Magnitude > 1 then
         return nil, pivot.Position, hum, false
@@ -551,7 +692,9 @@ trackConn(Players.PlayerRemoving:Connect(function(plr)
     removeEspForPlayer(plr)
 end))
 
-
+-- ============================================
+-- ระบบบินอิสระตัวละคร (Free Fly)
+-- ============================================
 local function removeFlyMovers()
     if flyBV then safeDestroy(flyBV); flyBV = nil end
     if flyBG then safeDestroy(flyBG); flyBG = nil end
@@ -560,18 +703,20 @@ end
 local function syncFlyUI()
     if not uiRefs.flyBtn then return end
     if isFlying then
-        uiRefs.flyBtn.Text = "⏹️  ปิดบินอิสระ (RShift)"
+        uiRefs.flyBtn.Text = "⏹️  ปิดบินอิสระ"
         uiRefs.flyBtn.BackgroundColor3 = Color3.fromRGB(200, 70, 70)
     else
-        uiRefs.flyBtn.Text = "🕊️  บินอิสระตัวละคร: ปิด (RShift)"
+        uiRefs.flyBtn.Text = "🕊️  บินอิสระตัวละคร: ปิด"
         uiRefs.flyBtn.BackgroundColor3 = Color3.fromRGB(90, 60, 160)
     end
+    updateTouchPadVisibility()
 end
 
 local function stopFly()
     isFlying = false
     if flyLoop then flyLoop:Disconnect(); flyLoop = nil end
     removeFlyMovers()
+    resetTouchHeld()
 
     local char = Player.Character
     local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -623,14 +768,6 @@ local function startFly()
     -- หยุดขับเรือก่อนถ้ากำลังเปิดอยู่ (กันแย่งควบคุมกัน)
     if isEnabled then
         stopSystem()
-        if uiRefs.tog then
-            uiRefs.tog.Text = "🎮  เปิดระบบขับเรือ (WASD)"
-            uiRefs.tog.BackgroundColor3 = Color3.fromRGB(0, 140, 75)
-        end
-        if uiRefs.ad then
-            uiRefs.ad.Text = "🧭  Auto Drive (ตรงไปอัตโนมัติ)"
-            uiRefs.ad.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
-        end
     end
     if hum.SeatPart then
         hum.Sit = false
@@ -644,7 +781,7 @@ local function startFly()
     hum.PlatformStand = true
     syncFlyUI()
     if uiRefs.status then
-        uiRefs.status.Text = "🕊️  กำลังบิน (WASD + Space/LCtrl)"
+        uiRefs.status.Text = "🕊️  กำลังบินอิสระ (จอย/WASD + ขึ้นลง)"
         uiRefs.status.TextColor3 = Color3.fromRGB(190, 150, 255)
     end
 
@@ -673,12 +810,34 @@ local function startFly()
         local camCF = cam.CFrame
 
         local moveDir = Vector3.new(0, 0, 0)
-        if pressing(Enum.KeyCode.W) then moveDir = moveDir + camCF.LookVector end
-        if pressing(Enum.KeyCode.S) then moveDir = moveDir - camCF.LookVector end
-        if pressing(Enum.KeyCode.D) then moveDir = moveDir + camCF.RightVector end
-        if pressing(Enum.KeyCode.A) then moveDir = moveDir - camCF.RightVector end
-        if pressing(Enum.KeyCode.Space) then moveDir = moveDir + Vector3.new(0, 1, 0) end
-        if pressing(Enum.KeyCode.LeftControl) then moveDir = moveDir - Vector3.new(0, 1, 0) end
+        local keyActive = pressing(Enum.KeyCode.W) or pressing(Enum.KeyCode.S)
+            or pressing(Enum.KeyCode.A) or pressing(Enum.KeyCode.D)
+
+        if keyActive then
+            if pressing(Enum.KeyCode.W) then moveDir = moveDir + camCF.LookVector end
+            if pressing(Enum.KeyCode.S) then moveDir = moveDir - camCF.LookVector end
+            if pressing(Enum.KeyCode.D) then moveDir = moveDir + camCF.RightVector end
+            if pressing(Enum.KeyCode.A) then moveDir = moveDir - camCF.RightVector end
+        else
+            local thumb = getThumbstickVector()
+            if thumb and thumb.Magnitude > 0.05 then
+                moveDir = moveDir + camCF.LookVector * (-thumb.Z) + camCF.RightVector * thumb.X
+            elseif h.MoveDirection.Magnitude > 0.05 then
+                -- fallback: แปลง MoveDirection ให้บิน 3 มิติตามมุมกล้อง
+                local flatLook = Vector3.new(camCF.LookVector.X, 0, camCF.LookVector.Z)
+                local flatRight = Vector3.new(camCF.RightVector.X, 0, camCF.RightVector.Z)
+                if flatLook.Magnitude > 0.01 and flatRight.Magnitude > 0.01 then
+                    local fwdAmt = h.MoveDirection:Dot(flatLook.Unit)
+                    local rightAmt = h.MoveDirection:Dot(flatRight.Unit)
+                    moveDir = moveDir + camCF.LookVector * fwdAmt + camCF.RightVector * rightAmt
+                end
+            end
+        end
+
+        if touchHeld.left then moveDir = moveDir - camCF.RightVector end
+        if touchHeld.right then moveDir = moveDir + camCF.RightVector end
+        if pressing(Enum.KeyCode.Space) or touchHeld.up then moveDir = moveDir + Vector3.new(0, 1, 0) end
+        if pressing(Enum.KeyCode.LeftControl) or touchHeld.down then moveDir = moveDir - Vector3.new(0, 1, 0) end
 
         if moveDir.Magnitude > 0 then
             flyBV.Velocity = moveDir.Unit * flySpeed
@@ -696,26 +855,125 @@ local function startFly()
 end
 
 -- ============================================
--- GUI
+-- Helper ลากหน้าต่าง (รองรับทั้งนิ้วทัชและเมาส์)
+-- ============================================
+local function makeDraggable(handle, target, onTap)
+    local dragging = false
+    local dragInput = nil
+    local startPos = nil
+    local startFramePos = nil
+    local moved = false
+
+    local function finishDrag()
+        if not dragging then return end
+        dragging = false
+        dragInput = nil
+        if not moved and onTap then
+            onTap()
+        end
+    end
+
+    handle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragInput = input
+            startPos = input.Position
+            startFramePos = target.Position
+            moved = false
+
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    finishDrag()
+                end
+            end)
+        end
+    end)
+
+    handle.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch) then
+            dragInput = input
+        end
+    end)
+
+    trackConn(UIS.InputChanged:Connect(function(input)
+        if dragging and (input == dragInput or input.UserInputType == Enum.UserInputType.MouseMovement) then
+            local delta = input.Position - startPos
+            if delta.Magnitude > 8 then
+                moved = true
+            end
+            target.Position = UDim2.new(
+                startFramePos.X.Scale,
+                startFramePos.X.Offset + delta.X,
+                startFramePos.Y.Scale,
+                startFramePos.Y.Offset + delta.Y
+            )
+        end
+    end))
+
+    trackConn(UIS.InputEnded:Connect(function(input)
+        if dragging and input == dragInput then
+            finishDrag()
+        end
+    end))
+end
+
+local function bindHoldButton(btn, flagName, activeCol, idleCol)
+    uiRefs.padButtons = uiRefs.padButtons or {}
+    table.insert(uiRefs.padButtons, { btn = btn, idleCol = idleCol })
+
+    local activeInput = nil
+    btn.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            activeInput = input
+            touchHeld[flagName] = true
+            btn.BackgroundColor3 = activeCol
+        end
+    end)
+
+    trackConn(UIS.InputEnded:Connect(function(input)
+        if activeInput and input == activeInput then
+            activeInput = nil
+            touchHeld[flagName] = false
+            btn.BackgroundColor3 = idleCol
+        end
+    end))
+end
+
+-- ============================================
+-- GUI (รองรับมือถือ + PC)
 -- ============================================
 local function buildGUI()
     local parent = guiParent()
     local old = parent:FindFirstChild("AutoBoatGUI")
     if old then old:Destroy() end
 
+    table.clear(uiRefs)
+
     local sg = Instance.new("ScreenGui")
     sg.Name = "AutoBoatGUI"
     sg.ResetOnSpawn = false
+    sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     sg.Parent = parent
+
+    local function calcPanelHeight()
+        local cam = workspace.CurrentCamera
+        local vh = cam and cam.ViewportSize.Y or 720
+        return math.clamp(vh - 30, 240, 598)
+    end
+
+    local panelH = calcPanelHeight()
 
     local main = Instance.new("Frame")
     main.Name = "Main"
-    main.Size = UDim2.new(0, 300, 0, 566)
-    main.Position = UDim2.new(0, 20, 0.5, -283)
+    main.Size = UDim2.new(0, 296, 0, panelH)
+    main.Position = UDim2.new(0, 14, 0.5, -math.floor(panelH / 2))
     main.BackgroundColor3 = Color3.fromRGB(15, 18, 30)
     main.BorderSizePixel = 0
+    main.ClipsDescendants = true
     main.Active = true
-    main.Draggable = true
     main.Parent = sg
     Instance.new("UICorner", main).CornerRadius = UDim.new(0, 12)
 
@@ -725,27 +983,97 @@ local function buildGUI()
     mst.Transparency = 0.3
     mst.Parent = main
 
-    -- Title
+    -- ปุ่มลอยสำหรับมือถือ/PC ตอนย่อเมนู
+    local miniBtn = Instance.new("TextButton")
+    miniBtn.Name = "MiniToggle"
+    miniBtn.Size = UDim2.new(0, 96, 0, 34)
+    miniBtn.Position = UDim2.new(0, 14, 0, 66)
+    miniBtn.BackgroundColor3 = Color3.fromRGB(0, 130, 75)
+    miniBtn.Text = "🚢  เมนู"
+    miniBtn.TextColor3 = Color3.new(1, 1, 1)
+    miniBtn.TextSize = 13
+    miniBtn.Font = Enum.Font.GothamBold
+    miniBtn.Selectable = false
+    miniBtn.Visible = false
+    miniBtn.Parent = sg
+    Instance.new("UICorner", miniBtn).CornerRadius = UDim.new(0, 10)
+    local miniStroke = Instance.new("UIStroke")
+    miniStroke.Color = Color3.fromRGB(80, 255, 170)
+    miniStroke.Thickness = 1.2
+    miniStroke.Parent = miniBtn
+
+    -- Title Bar (ลากได้ทั้งนิ้วและเมาส์)
     local tb = Instance.new("Frame")
-    tb.Size = UDim2.new(1, 0, 0, 40)
+    tb.Size = UDim2.new(1, 0, 0, 38)
     tb.BackgroundColor3 = Color3.fromRGB(0, 130, 75)
     tb.BorderSizePixel = 0
+    tb.Active = true
     tb.Parent = main
     Instance.new("UICorner", tb).CornerRadius = UDim.new(0, 12)
     local tbf = Instance.new("Frame")
-    tbf.Size = UDim2.new(1, 0, 0, 14)
-    tbf.Position = UDim2.new(0, 0, 1, -14)
+    tbf.Size = UDim2.new(1, 0, 0, 12)
+    tbf.Position = UDim2.new(0, 0, 1, -12)
     tbf.BackgroundColor3 = Color3.fromRGB(0, 130, 75)
     tbf.BorderSizePixel = 0
     tbf.Parent = tb
+
     local tl = Instance.new("TextLabel")
-    tl.Size = UDim2.new(1, 0, 1, 0)
+    tl.Size = UDim2.new(1, -48, 1, 0)
+    tl.Position = UDim2.new(0, 10, 0, 0)
     tl.BackgroundTransparency = 1
-    tl.Text = "🚢  Auto Boat v4.1 + Fly + ESP"
+    tl.Text = "🚢  Auto Boat + Fly + ESP"
     tl.TextColor3 = Color3.new(1, 1, 1)
-    tl.TextSize = 14
+    tl.TextSize = 13
     tl.Font = Enum.Font.GothamBold
+    tl.TextXAlignment = Enum.TextXAlignment.Left
     tl.Parent = tb
+
+    local minBtn = Instance.new("TextButton")
+    minBtn.Size = UDim2.new(0, 32, 0, 26)
+    minBtn.Position = UDim2.new(1, -38, 0, 6)
+    minBtn.BackgroundColor3 = Color3.fromRGB(0, 95, 55)
+    minBtn.Text = "—"
+    minBtn.TextColor3 = Color3.new(1, 1, 1)
+    minBtn.TextSize = 14
+    minBtn.Font = Enum.Font.GothamBold
+    minBtn.Selectable = false
+    minBtn.Parent = tb
+    Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 7)
+
+    makeDraggable(tb, main)
+    makeDraggable(miniBtn, miniBtn, function()
+        main.Visible = true
+        miniBtn.Visible = false
+    end)
+
+    minBtn.MouseButton1Click:Connect(function()
+        main.Visible = false
+        miniBtn.Visible = true
+    end)
+
+    -- ScrollingFrame ภายในเมนู (เลื่อนได้บนจอมือถือเล็กๆ)
+    local scroll = Instance.new("ScrollingFrame")
+    scroll.Size = UDim2.new(1, 0, 1, -40)
+    scroll.Position = UDim2.new(0, 0, 0, 40)
+    scroll.BackgroundTransparency = 1
+    scroll.BorderSizePixel = 0
+    scroll.ScrollBarThickness = 4
+    scroll.ScrollBarImageColor3 = Color3.fromRGB(0, 180, 110)
+    scroll.ScrollingDirection = Enum.ScrollingDirection.Y
+    scroll.CanvasSize = UDim2.new(0, 0, 0, 554)
+    scroll.Active = true
+    scroll.Parent = main
+
+    -- ปรับความสูงอัตโนมัติเมื่อหมุนหน้าจอมือถือ
+    local cam = workspace.CurrentCamera
+    if cam then
+        trackConn(cam:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+            if main and main.Parent then
+                local h = calcPanelHeight()
+                main.Size = UDim2.new(0, 296, 0, h)
+            end
+        end))
+    end
 
     local function section(text, py)
         local bg2 = Instance.new("Frame")
@@ -753,7 +1081,7 @@ local function buildGUI()
         bg2.Position = UDim2.new(0, 12, 0, py)
         bg2.BackgroundColor3 = Color3.fromRGB(25, 30, 50)
         bg2.BorderSizePixel = 0
-        bg2.Parent = main
+        bg2.Parent = scroll
         Instance.new("UICorner", bg2).CornerRadius = UDim.new(0, 6)
         local l = Instance.new("TextLabel")
         l.Size = UDim2.new(1, -10, 1, 0)
@@ -769,13 +1097,13 @@ local function buildGUI()
 
     local function valBox(py)
         local l = Instance.new("TextLabel")
-        l.Size = UDim2.new(0, 90, 0, 26)
-        l.Position = UDim2.new(1, -105, 0, py)
+        l.Size = UDim2.new(0, 86, 0, 26)
+        l.Position = UDim2.new(1, -100, 0, py)
         l.BackgroundColor3 = Color3.fromRGB(20, 25, 45)
         l.TextColor3 = Color3.fromRGB(80, 255, 170)
         l.TextSize = 14
         l.Font = Enum.Font.GothamBold
-        l.Parent = main
+        l.Parent = scroll
         Instance.new("UICorner", l).CornerRadius = UDim.new(0, 6)
         local vs = Instance.new("UIStroke")
         vs.Color = Color3.fromRGB(80, 255, 170)
@@ -795,7 +1123,7 @@ local function buildGUI()
         b.TextSize = 13
         b.Font = Enum.Font.GothamBold
         b.Selectable = false
-        b.Parent = main
+        b.Parent = scroll
         Instance.new("UICorner", b).CornerRadius = UDim.new(0, 8)
         return b
     end
@@ -805,43 +1133,43 @@ local function buildGUI()
     local g1 = Color3.fromRGB(40, 160, 70)
     local g2 = Color3.fromRGB(25, 120, 45)
 
-
-    section("⚡  ความเร็วเรือ", 48)
-    local spdV = valBox(70)
+    -- ⚡ ความเร็วเรือ
+    section("⚡  ความเร็วเรือ", 6)
+    local spdV = valBox(28)
     spdV.Text = tostring(boatSpeed)
     local function setSpd(v) boatSpeed = math.clamp(v, 10, 2000); spdV.Text = tostring(boatSpeed) end
-    mbtn("−", 12, 70, 36, r1).MouseButton1Click:Connect(function() setSpd(boatSpeed - 10) end)
-    mbtn("−50", 53, 70, 42, r2).MouseButton1Click:Connect(function() setSpd(boatSpeed - 50) end)
-    mbtn("+", 100, 70, 36, g1).MouseButton1Click:Connect(function() setSpd(boatSpeed + 10) end)
-    mbtn("+50", 141, 70, 42, g2).MouseButton1Click:Connect(function() setSpd(boatSpeed + 50) end)
+    mbtn("−", 12, 28, 36, r1).MouseButton1Click:Connect(function() setSpd(boatSpeed - 10) end)
+    mbtn("−50", 53, 28, 42, r2).MouseButton1Click:Connect(function() setSpd(boatSpeed - 50) end)
+    mbtn("+", 100, 28, 36, g1).MouseButton1Click:Connect(function() setSpd(boatSpeed + 10) end)
+    mbtn("+50", 141, 28, 42, g2).MouseButton1Click:Connect(function() setSpd(boatSpeed + 50) end)
 
-
-    section("📏  ความสูงเรือ (Q ขึ้น / E ลง)", 104)
-    local hgtV = valBox(126)
+    -- 📏 ความสูงเรือ
+    section("📏  ความสูงเรือ (Q/E หรือปุ่มขึ้น-ลง)", 62)
+    local hgtV = valBox(84)
     hgtV.Text = tostring(math.floor(boatHeight))
     local function setHgt(v) boatHeight = math.clamp(v, -50, 5000); hgtV.Text = tostring(math.floor(boatHeight)) end
-    mbtn("−", 12, 126, 36, r1).MouseButton1Click:Connect(function() setHgt(boatHeight - 10) end)
-    mbtn("−50", 53, 126, 42, r2).MouseButton1Click:Connect(function() setHgt(boatHeight - 50) end)
-    mbtn("+", 100, 126, 36, g1).MouseButton1Click:Connect(function() setHgt(boatHeight + 10) end)
-    mbtn("+50", 141, 126, 42, g2).MouseButton1Click:Connect(function() setHgt(boatHeight + 50) end)
+    mbtn("−", 12, 84, 36, r1).MouseButton1Click:Connect(function() setHgt(boatHeight - 10) end)
+    mbtn("−50", 53, 84, 42, r2).MouseButton1Click:Connect(function() setHgt(boatHeight - 50) end)
+    mbtn("+", 100, 84, 36, g1).MouseButton1Click:Connect(function() setHgt(boatHeight + 10) end)
+    mbtn("+50", 141, 84, 42, g2).MouseButton1Click:Connect(function() setHgt(boatHeight + 50) end)
 
-
-    section("🔄  ความเร็วเลี้ยว", 160)
-    local trnV = valBox(182)
+    -- 🔄 ความเร็วเลี้ยวเรือ
+    section("🔄  ความเร็วเลี้ยวเรือ", 118)
+    local trnV = valBox(140)
     trnV.Text = string.format("%.1f", turnSpeed)
     local function setTrn(v) turnSpeed = math.clamp(v, 0.5, 8); trnV.Text = string.format("%.1f", turnSpeed) end
-    mbtn("−", 12, 182, 55, r1).MouseButton1Click:Connect(function() setTrn(turnSpeed - 0.5) end)
-    mbtn("+", 72, 182, 55, g1).MouseButton1Click:Connect(function() setTrn(turnSpeed + 0.5) end)
+    mbtn("−", 12, 140, 55, r1).MouseButton1Click:Connect(function() setTrn(turnSpeed - 0.5) end)
+    mbtn("+", 72, 140, 55, g1).MouseButton1Click:Connect(function() setTrn(turnSpeed + 0.5) end)
 
-  
-    section("🕊️  ความเร็วบินตัวละคร", 216)
-    local flyV = valBox(238)
+    -- 🕊️ ความเร็วบินตัวละคร
+    section("🕊️  ความเร็วบินตัวละคร", 174)
+    local flyV = valBox(196)
     flyV.Text = tostring(flySpeed)
     local function setFlySpd(v) flySpeed = math.clamp(v, 20, 1000); flyV.Text = tostring(flySpeed) end
-    mbtn("−", 12, 238, 36, r1).MouseButton1Click:Connect(function() setFlySpd(flySpeed - 10) end)
-    mbtn("−50", 53, 238, 42, r2).MouseButton1Click:Connect(function() setFlySpd(flySpeed - 50) end)
-    mbtn("+", 100, 238, 36, g1).MouseButton1Click:Connect(function() setFlySpd(flySpeed + 10) end)
-    mbtn("+50", 141, 238, 42, g2).MouseButton1Click:Connect(function() setFlySpd(flySpeed + 50) end)
+    mbtn("−", 12, 196, 36, r1).MouseButton1Click:Connect(function() setFlySpd(flySpeed - 10) end)
+    mbtn("−50", 53, 196, 42, r2).MouseButton1Click:Connect(function() setFlySpd(flySpeed - 50) end)
+    mbtn("+", 100, 196, 36, g1).MouseButton1Click:Connect(function() setFlySpd(flySpeed + 10) end)
+    mbtn("+50", 141, 196, 42, g2).MouseButton1Click:Connect(function() setFlySpd(flySpeed + 50) end)
 
     task.spawn(function()
         while main.Parent do
@@ -852,90 +1180,146 @@ local function buildGUI()
 
     local status = Instance.new("TextLabel")
     status.Size = UDim2.new(1, -24, 0, 20)
-    status.Position = UDim2.new(0, 12, 0, 272)
+    status.Position = UDim2.new(0, 12, 0, 230)
     status.BackgroundTransparency = 1
     status.Text = "⏸️  สถานะ: ปิดอยู่"
     status.TextColor3 = Color3.fromRGB(255, 180, 80)
     status.TextSize = 12
     status.Font = Enum.Font.GothamBold
     status.TextXAlignment = Enum.TextXAlignment.Left
-    status.Parent = main
+    status.Parent = scroll
 
-   
+    -- ปุ่มเปิด/ปิดขับเรือ
     local tog = Instance.new("TextButton")
     tog.Size = UDim2.new(1, -24, 0, 36)
-    tog.Position = UDim2.new(0, 12, 0, 298)
+    tog.Position = UDim2.new(0, 12, 0, 256)
     tog.BackgroundColor3 = Color3.fromRGB(0, 140, 75)
-    tog.Text = "🎮  เปิดระบบขับเรือ (WASD)"
+    tog.Text = "🎮  เปิดระบบขับเรือ"
     tog.TextColor3 = Color3.new(1, 1, 1)
     tog.TextSize = 13
     tog.Font = Enum.Font.GothamBold
     tog.Selectable = false
-    tog.Parent = main
+    tog.Parent = scroll
     Instance.new("UICorner", tog).CornerRadius = UDim.new(0, 9)
 
     -- Auto Drive
     local ad = Instance.new("TextButton")
     ad.Size = UDim2.new(1, -24, 0, 36)
-    ad.Position = UDim2.new(0, 12, 0, 340)
+    ad.Position = UDim2.new(0, 12, 0, 298)
     ad.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
     ad.Text = "🧭  Auto Drive (ตรงไปอัตโนมัติ)"
     ad.TextColor3 = Color3.fromRGB(200, 200, 220)
     ad.TextSize = 13
     ad.Font = Enum.Font.GothamBold
     ad.Selectable = false
-    ad.Parent = main
+    ad.Parent = scroll
     Instance.new("UICorner", ad).CornerRadius = UDim.new(0, 9)
 
- 
+    -- ปุ่มบินอิสระตัวละคร
     local flyBtn = Instance.new("TextButton")
     flyBtn.Size = UDim2.new(1, -24, 0, 36)
-    flyBtn.Position = UDim2.new(0, 12, 0, 382)
+    flyBtn.Position = UDim2.new(0, 12, 0, 340)
     flyBtn.BackgroundColor3 = Color3.fromRGB(90, 60, 160)
-    flyBtn.Text = "🕊️  บินอิสระตัวละคร: ปิด (RShift)"
+    flyBtn.Text = "🕊️  บินอิสระตัวละคร: ปิด"
     flyBtn.TextColor3 = Color3.new(1, 1, 1)
     flyBtn.TextSize = 13
     flyBtn.Font = Enum.Font.GothamBold
     flyBtn.Selectable = false
-    flyBtn.Parent = main
+    flyBtn.Parent = scroll
     Instance.new("UICorner", flyBtn).CornerRadius = UDim.new(0, 9)
 
     -- ESP ชื่อผู้เล่น
     local espBtn = Instance.new("TextButton")
     espBtn.Size = UDim2.new(1, -24, 0, 36)
-    espBtn.Position = UDim2.new(0, 12, 0, 424)
+    espBtn.Position = UDim2.new(0, 12, 0, 382)
     espBtn.BackgroundColor3 = Color3.fromRGB(45, 55, 85)
     espBtn.Text = "👁️  ESP ชื่อผู้เล่น: ปิด"
     espBtn.TextColor3 = Color3.fromRGB(200, 220, 255)
     espBtn.TextSize = 13
     espBtn.Font = Enum.Font.GothamBold
     espBtn.Selectable = false
-    espBtn.Parent = main
+    espBtn.Parent = scroll
     Instance.new("UICorner", espBtn).CornerRadius = UDim.new(0, 9)
 
+    -- ปุ่มเปิด/ปิด Touch Pad บนหน้าจอ (สำหรับมือถือ/แท็บเล็ต)
+    local padBtn = Instance.new("TextButton")
+    padBtn.Size = UDim2.new(1, -24, 0, 32)
+    padBtn.Position = UDim2.new(0, 12, 0, 424)
+    padBtn.BackgroundColor3 = showTouchPad and Color3.fromRGB(35, 110, 140) or Color3.fromRGB(40, 45, 65)
+    padBtn.Text = showTouchPad and "📱  ปุ่มควบคุมบนจอ: เปิด" or "📱  ปุ่มควบคุมบนจอ: ปิด"
+    padBtn.TextColor3 = Color3.fromRGB(220, 240, 255)
+    padBtn.TextSize = 12
+    padBtn.Font = Enum.Font.GothamBold
+    padBtn.Selectable = false
+    padBtn.Parent = scroll
+    Instance.new("UICorner", padBtn).CornerRadius = UDim.new(0, 8)
+
+    -- แผงปุ่มกดบนหน้าจอ (Touch Pad) ด้านขวา ลากย้ายตำแหน่งได้
+    local touchPad = Instance.new("Frame")
+    touchPad.Name = "TouchPad"
+    touchPad.Size = UDim2.new(0, 116, 0, 134)
+    touchPad.Position = UDim2.new(1, -132, 0.36, -67)
+    touchPad.BackgroundColor3 = Color3.fromRGB(15, 18, 30)
+    touchPad.BackgroundTransparency = 0.25
+    touchPad.BorderSizePixel = 0
+    touchPad.Visible = false
+    touchPad.Active = true
+    touchPad.Parent = sg
+    Instance.new("UICorner", touchPad).CornerRadius = UDim.new(0, 12)
+    local tpStroke = Instance.new("UIStroke")
+    tpStroke.Color = Color3.fromRGB(90, 150, 255)
+    tpStroke.Thickness = 1.2
+    tpStroke.Transparency = 0.4
+    tpStroke.Parent = touchPad
+
+    local padHeader = Instance.new("TextLabel")
+    padHeader.Size = UDim2.new(1, 0, 0, 18)
+    padHeader.BackgroundTransparency = 1
+    padHeader.Text = "⠿ ลากย้ายได้"
+    padHeader.TextColor3 = Color3.fromRGB(160, 185, 225)
+    padHeader.TextSize = 10
+    padHeader.Font = Enum.Font.Gotham
+    padHeader.Active = true
+    padHeader.Parent = touchPad
+    makeDraggable(padHeader, touchPad)
+
+    local function makePadBtn(txt, px, py, sx, sy, idleCol, activeCol, flagName)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(0, sx, 0, sy)
+        b.Position = UDim2.new(0, px, 0, py)
+        b.BackgroundColor3 = idleCol
+        b.Text = txt
+        b.TextColor3 = Color3.new(1, 1, 1)
+        b.TextSize = 13
+        b.Font = Enum.Font.GothamBold
+        b.Selectable = false
+        b.Parent = touchPad
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 8)
+        bindHoldButton(b, flagName, activeCol, idleCol)
+        return b
+    end
+
+    makePadBtn("▲ ขึ้น", 8, 20, 100, 34, Color3.fromRGB(35, 125, 85), Color3.fromRGB(60, 195, 125), "up")
+    makePadBtn("◀", 8, 58, 47, 32, Color3.fromRGB(50, 70, 115), Color3.fromRGB(80, 120, 200), "left")
+    makePadBtn("▶", 61, 58, 47, 32, Color3.fromRGB(50, 70, 115), Color3.fromRGB(80, 120, 200), "right")
+    makePadBtn("▼ ลง", 8, 94, 100, 34, Color3.fromRGB(150, 60, 60), Color3.fromRGB(215, 85, 85), "down")
+
+    uiRefs.main = main
+    uiRefs.miniBtn = miniBtn
     uiRefs.tog = tog
     uiRefs.ad = ad
     uiRefs.flyBtn = flyBtn
     uiRefs.espBtn = espBtn
+    uiRefs.padBtn = padBtn
+    uiRefs.touchPad = touchPad
     uiRefs.status = status
 
     tog.MouseButton1Click:Connect(function()
         if isEnabled then
             stopSystem()
-            tog.Text = "🎮  เปิดระบบขับเรือ (WASD)"
-            tog.BackgroundColor3 = Color3.fromRGB(0, 140, 75)
-            ad.Text = "🧭  Auto Drive (ตรงไปอัตโนมัติ)"
-            ad.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
-            status.Text = "⏸️  สถานะ: ปิดอยู่"
-            status.TextColor3 = Color3.fromRGB(255, 180, 80)
         else
             if isFlying then stopFly() end
-            if startSystem() then
-                tog.Text = "⏹️  ปิดระบบ"
-                tog.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
-                status.Text = "🎮  WASD ขับ | A/D เลี้ยว | Q/E สูงต่ำ"
-                status.TextColor3 = Color3.fromRGB(80, 255, 150)
-            else
+            if not startSystem() then
                 status.Text = "❌  นั่งเรือก่อน!"
                 status.TextColor3 = Color3.fromRGB(255, 80, 80)
             end
@@ -949,17 +1333,7 @@ local function buildGUI()
             return
         end
         isAutoDrive = not isAutoDrive
-        if isAutoDrive then
-            ad.Text = "⏹️  ปิด Auto Drive"
-            ad.BackgroundColor3 = Color3.fromRGB(200, 130, 0)
-            status.Text = "🧭  Auto ON | A/D เลี้ยวได้"
-            status.TextColor3 = Color3.fromRGB(255, 220, 80)
-        else
-            ad.Text = "🧭  Auto Drive (ตรงไปอัตโนมัติ)"
-            ad.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
-            status.Text = "🎮  WASD ขับ | A/D เลี้ยว | Q/E สูงต่ำ"
-            status.TextColor3 = Color3.fromRGB(80, 255, 150)
-        end
+        syncBoatUI()
     end)
 
     flyBtn.MouseButton1Click:Connect(function()
@@ -987,13 +1361,20 @@ local function buildGUI()
         end
     end)
 
-    -- คีย์ลัด
+    padBtn.MouseButton1Click:Connect(function()
+        showTouchPad = not showTouchPad
+        padBtn.BackgroundColor3 = showTouchPad and Color3.fromRGB(35, 110, 140) or Color3.fromRGB(40, 45, 65)
+        padBtn.Text = showTouchPad and "📱  ปุ่มควบคุมบนจอ: เปิด" or "📱  ปุ่มควบคุมบนจอ: ปิด"
+        updateTouchPadVisibility()
+    end)
+
+    -- กล่องคำแนะนำการใช้งาน
     local kb = Instance.new("Frame")
-    kb.Size = UDim2.new(1, -24, 0, 88)
-    kb.Position = UDim2.new(0, 12, 0, 468)
+    kb.Size = UDim2.new(1, -24, 0, 80)
+    kb.Position = UDim2.new(0, 12, 0, 464)
     kb.BackgroundColor3 = Color3.fromRGB(20, 24, 40)
     kb.BorderSizePixel = 0
-    kb.Parent = main
+    kb.Parent = scroll
     Instance.new("UICorner", kb).CornerRadius = UDim.new(0, 8)
     local kbs = Instance.new("UIStroke")
     kbs.Color = Color3.fromRGB(60, 70, 100)
@@ -1003,14 +1384,14 @@ local function buildGUI()
     kt.Size = UDim2.new(1, -16, 1, -8)
     kt.Position = UDim2.new(0, 8, 0, 4)
     kt.BackgroundTransparency = 1
-    kt.Text = "⌨️  ปุ่มควบคุม:\n"
-        .. "   เรือ: WASD ขับ | Q/E ขึ้น-ลง\n"
-        .. "   บิน: WASD ตามกล้อง | Space/LCtrl ขึ้น-ลง\n"
-        .. "   Right Shift = เปิด/ปิดบิน\n"
-        .. "   Right Ctrl = ซ่อน/แสดง GUI"
+    kt.Text = "📱/⌨️  วิธีควบคุม:\n"
+        .. "   มือถือ: ใช้จอยสติ๊กเดิน/เลี้ยว + ปุ่ม ▲ขึ้น/▼ลง บนจอ\n"
+        .. "   PC เรือ: WASD ขับ | Q/E ขึ้น-ลง\n"
+        .. "   PC บิน: WASD + Space/LCtrl | RShift เปิด-ปิดบิน"
     kt.TextColor3 = Color3.fromRGB(140, 155, 190)
-    kt.TextSize = 11
+    kt.TextSize = 10
     kt.Font = Enum.Font.Gotham
+    kt.TextWrapped = true
     kt.TextXAlignment = Enum.TextXAlignment.Left
     kt.TextYAlignment = Enum.TextYAlignment.Top
     kt.Parent = kb
@@ -1019,8 +1400,11 @@ end
 trackConn(UIS.InputBegan:Connect(function(input, gpe)
     if gpe or UIS:GetFocusedTextBox() then return end
     if input.KeyCode == Enum.KeyCode.RightControl then
-        local g = guiParent():FindFirstChild("AutoBoatGUI")
-        if g then g.Enabled = not g.Enabled end
+        if uiRefs.main and uiRefs.miniBtn then
+            local show = not uiRefs.main.Visible
+            uiRefs.main.Visible = show
+            uiRefs.miniBtn.Visible = not show
+        end
     elseif input.KeyCode == Enum.KeyCode.RightShift then
         if isFlying then
             stopFly()
@@ -1054,7 +1438,7 @@ end)
 
 buildGUI()
 print("=============================================")
-print("  🚢 Auto Boat v4.1 + Fly + ESP Loaded!")
-print("  ✅ ขับเรือ v4.1 + บินอิสระ + ESP")
-print("  🎮 RShift บิน | RCtrl ซ่อน GUI")
+print("  🚢 Auto Boat v4.1 + Fly + ESP (PC & Mobile)")
+print("  📱 รองรับมือถือ: จอยสติ๊ก + ปุ่มทัช + ย่อเมนู")
+print("  🎮 PC: RShift บิน | RCtrl ซ่อนเมนู")
 print("=============================================")
