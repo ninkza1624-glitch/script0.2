@@ -1,30 +1,1060 @@
--- ตัวแปร
--- เลือกของ
+--[[
+    ╔═══════════════════════════════════════════════════╗
+    ║   Blox Fruits - Auto Boat v4.1 + Fly + ESP        ║
+    ║   🚢 ขับเรือ v4.1 + 🕊️ บินอิสระ + 👁️ ESP ชื่อคน  ║
+    ╚═══════════════════════════════════════════════════╝
+
+    - ระบบขับเรือ v4.1 เดิมทั้งหมด (BodyMovers + Network Ownership)
+    - เพิ่มระบบบินอิสระของตัวละคร (WASD ตามมุมกล้อง, Space ขึ้น, LCtrl ลง, Right Shift เปิด/ปิด)
+    - เพิ่มปุ่มเปิด/ปิด ESP ชื่อผู้เล่น (แสดงชื่อ, ทีม, ระยะ, เลือด)
+]]
+
+
+pcall(function()
+    if getgenv and getgenv().AB_Cleanup then
+        getgenv().AB_Cleanup()
+    end
+end)
+
 local Players = game:GetService("Players")
-local player = Players.LocalPlayer
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local Player = Players.LocalPlayer
 
-local function GetBackpackTools()
-    local tools = {}
-    local backpack = player:WaitForChild("Backpack")
+local boatHeight = 15
+local boatSpeed = 200
+local turnSpeed = 2.0
+local flySpeed = 120
 
-    for _, item in ipairs(backpack:GetChildren()) do
-        if item:IsA("Tool") then
-            table.insert(tools, item.Name)
+local isEnabled = false
+local isAutoDrive = false
+local isFlying = false
+local isEspEnabled = false
+local mainLoop = nil
+local flyLoop = nil
+local espLoop = nil
+local currentYaw = 0
+
+local bv, bg, bp = nil, nil, nil
+local flyBV, flyBG = nil, nil
+local held = {}
+local globalConns = {}
+local uiRefs = {}
+
+local function trackConn(c)
+    if c then table.insert(globalConns, c) end
+    return c
+end
+
+trackConn(UIS.InputBegan:Connect(function(input)
+    if UIS:GetFocusedTextBox() then return end
+    held[input.KeyCode] = true
+end))
+trackConn(UIS.InputEnded:Connect(function(input)
+    held[input.KeyCode] = nil
+end))
+
+local function pressing(k) return held[k] ~= nil end
+
+local function getSeat()
+    local char = Player.Character
+    if not char then return nil, nil end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum or not hum.SeatPart then return nil, nil end
+    local seat = hum.SeatPart
+    local boat = seat:FindFirstAncestorOfClass("Model")
+    if boat and boat ~= char then
+        return seat, boat
+    end
+    return seat, seat.Parent
+end
+
+local function claimOwnership(boat)
+    if not boat then return end
+    pcall(function()
+        for _, part in ipairs(boat:GetDescendants()) do
+            if part:IsA("BasePart") then
+                pcall(function()
+                    part:SetNetworkOwner(Player)
+                end)
+            end
+        end
+    end)
+end
+
+
+local function removeMovers()
+    if bv then pcall(game.Destroy, bv); bv = nil end
+    if bg then pcall(game.Destroy, bg); bg = nil end
+    if bp then pcall(game.Destroy, bp); bp = nil end
+end
+
+local function cleanOld(seat)
+    for _, c in ipairs(seat:GetChildren()) do
+        if c.Name:sub(1, 3) == "AB_" then
+            pcall(game.Destroy, c)
+        end
+    end
+end
+
+
+local function createMovers(seat)
+    removeMovers()
+    cleanOld(seat)
+
+    bv = Instance.new("BodyVelocity")
+    bv.Name = "AB_BV"
+    bv.MaxForce = Vector3.new(math.huge, 0, math.huge)
+    bv.Velocity = Vector3.new(0, 0, 0)
+    bv.P = 1250
+    bv.Parent = seat
+
+    bg = Instance.new("BodyGyro")
+    bg.Name = "AB_BG"
+    bg.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+    bg.P = 3000
+    bg.D = 300
+    bg.Parent = seat
+
+    bp = Instance.new("BodyPosition")
+    bp.Name = "AB_BP"
+    bp.MaxForce = Vector3.new(0, math.huge, 0)
+    bp.P = 3000
+    bp.D = 600
+    bp.Position = Vector3.new(seat.Position.X, boatHeight, seat.Position.Z)
+    bp.Parent = seat
+end
+
+
+local function startSystem()
+    local seat, boat = getSeat()
+    if not seat then
+        warn("[Boat] ❌ นั่งเรือก่อน!")
+        return false
+    end
+
+    isEnabled = true
+    boatHeight = seat.Position.Y
+
+    local _, y, _ = seat.CFrame:ToEulerAnglesYXZ()
+    currentYaw = y
+
+    -- ขอ Network Ownership
+    claimOwnership(boat)
+
+    pcall(function()
+        for _, v in ipairs(boat:GetDescendants()) do
+            if v:IsA("BodyVelocity") or v:IsA("BodyGyro") or v:IsA("BodyPosition")
+                or v:IsA("BodyForce") or v:IsA("BodyThrust") then
+                if v.Name ~= "AB_BV" and v.Name ~= "AB_BG" and v.Name ~= "AB_BP" then
+                    v:Destroy()
+                end
+            end
+            -- ลบ LinearVelocity, AlignOrientation ด้วย (Roblox ใหม่)
+            if v:IsA("LinearVelocity") or v:IsA("AlignOrientation")
+                or v:IsA("AlignPosition") or v:IsA("AngularVelocity") then
+                v:Destroy()
+            end
+        end
+    end)
+
+    createMovers(seat)
+
+    if mainLoop then mainLoop:Disconnect() end
+
+    mainLoop = RunService.Heartbeat:Connect(function(dt)
+        if not isEnabled then
+            removeMovers()
+            if mainLoop then mainLoop:Disconnect(); mainLoop = nil end
+            return
+        end
+
+        local s, b = getSeat()
+        if not s then
+            isEnabled = false
+            isAutoDrive = false
+            removeMovers()
+            if mainLoop then mainLoop:Disconnect(); mainLoop = nil end
+            return
+        end
+
+        if not bv or bv.Parent ~= s then
+            claimOwnership(b)
+            createMovers(s)
+        end
+
+        -- Q/E ความสูง
+        if pressing(Enum.KeyCode.Q) then
+            boatHeight = math.min(5000, boatHeight + 80 * dt)
+        end
+        if pressing(Enum.KeyCode.E) then
+            boatHeight = math.max(-50, boatHeight - 80 * dt)
+        end
+
+        -- A/D เลี้ยว
+        local turn = 0
+        if pressing(Enum.KeyCode.A) then turn = turn + 1 end
+        if pressing(Enum.KeyCode.D) then turn = turn - 1 end
+        currentYaw = currentYaw + turn * turnSpeed * dt
+
+        -- BodyGyro — ล็อคให้เรือตั้งตรง + หมุนตาม yaw
+        bg.CFrame = CFrame.Angles(0, currentYaw, 0)
+
+        -- W/S ขับ
+        local fwd = Vector3.new(-math.sin(currentYaw), 0, -math.cos(currentYaw))
+        local speed = 0
+        if pressing(Enum.KeyCode.W) or isAutoDrive then speed = boatSpeed end
+        if pressing(Enum.KeyCode.S) then speed = speed - boatSpeed * 0.4 end
+
+        bv.Velocity = fwd * speed
+        bp.Position = Vector3.new(s.Position.X, boatHeight, s.Position.Z)
+    end)
+
+    return true
+end
+
+local function stopSystem()
+    isEnabled = false
+    isAutoDrive = false
+    removeMovers()
+    if mainLoop then mainLoop:Disconnect(); mainLoop = nil end
+end
+
+
+pcall(function()
+    local vu = game:GetService("VirtualUser")
+    trackConn(Player.Idled:Connect(function()
+        vu:Button2Down(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+        task.wait(1)
+        vu:Button2Up(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+    end))
+end)
+
+
+local function guiParent()
+    if gethui then return gethui() end
+    local ok, c = pcall(function() return game:GetService("CoreGui") end)
+    if ok and c then return c end
+    return Player:WaitForChild("PlayerGui")
+end
+
+
+local hasDrawing = pcall(function()
+    local t = Drawing.new("Text")
+    if t.Remove then t:Remove() elseif t.Destroy then t:Destroy() end
+end)
+
+local espFolder = nil
+local espAttachFolder = nil
+local espEntries = {}
+
+local function safeDestroy(obj)
+    if not obj then return end
+    pcall(function()
+        if obj.Remove then
+            obj:Remove()
+        elseif obj.Destroy then
+            obj:Destroy()
+        end
+    end)
+end
+
+local function getEspFolder()
+    local parent = guiParent()
+    if espFolder and espFolder.Parent == parent then
+        return espFolder
+    end
+    local old = parent:FindFirstChild("AutoBoatESP")
+    if old then old:Destroy() end
+    espFolder = Instance.new("Folder")
+    espFolder.Name = "AutoBoatESP"
+    espFolder.Parent = parent
+    return espFolder
+end
+
+local function getAttachFolder()
+    if espAttachFolder and espAttachFolder.Parent == workspace.Terrain then
+        return espAttachFolder
+    end
+    local old = workspace.Terrain:FindFirstChild("AutoBoatESP_Attach")
+    if old then old:Destroy() end
+    espAttachFolder = Instance.new("Folder")
+    espAttachFolder.Name = "AutoBoatESP_Attach"
+    espAttachFolder.Parent = workspace.Terrain
+    return espAttachFolder
+end
+
+local function getPlayerColor(plr)
+    if plr.Team and plr.TeamColor then
+        return plr.TeamColor.Color
+    end
+    return Color3.fromRGB(255, 240, 120)
+end
+
+local function getDisplayText(plr)
+    if plr.DisplayName ~= plr.Name then
+        return plr.DisplayName .. " (@" .. plr.Name .. ")"
+    end
+    return plr.Name
+end
+
+local function getPlayerTarget(plr)
+    local char = plr.Character
+    if not char then
+        local charsFolder = workspace:FindFirstChild("Characters")
+        if charsFolder then
+            char = charsFolder:FindFirstChild(plr.Name)
+        end
+    end
+    if not char then return nil, nil, nil, false end
+
+    local part = char:FindFirstChild("Head")
+        or char:FindFirstChild("HumanoidRootPart")
+        or char.PrimaryPart
+        or char:FindFirstChildWhichIsA("BasePart")
+    local hum = char:FindFirstChildOfClass("Humanoid")
+
+    if part and part:IsA("BasePart") then
+        return part, part.Position, hum, true
+    end
+
+  
+    local ok, pivot = pcall(function() return char:GetPivot() end)
+    if ok and pivot and pivot.Position.Magnitude > 1 then
+        return nil, pivot.Position, hum, false
+    end
+
+    return nil, nil, nil, false
+end
+
+local function removeEspForPlayer(plr)
+    local entry = espEntries[plr]
+    if entry then
+        if entry.nameDraw then safeDestroy(entry.nameDraw) end
+        if entry.infoDraw then safeDestroy(entry.infoDraw) end
+        if entry.gui then safeDestroy(entry.gui) end
+        if entry.attach then safeDestroy(entry.attach) end
+        espEntries[plr] = nil
+    end
+end
+
+local function createEspForPlayer(plr)
+    if plr == Player or espEntries[plr] then return end
+
+    if hasDrawing then
+        local nameDraw = Drawing.new("Text")
+        nameDraw.Visible = false
+        nameDraw.Center = true
+        nameDraw.Outline = true
+        nameDraw.OutlineColor = Color3.new(0, 0, 0)
+        nameDraw.Size = 15
+        nameDraw.Color = getPlayerColor(plr)
+        nameDraw.Text = getDisplayText(plr)
+
+        local infoDraw = Drawing.new("Text")
+        infoDraw.Visible = false
+        infoDraw.Center = true
+        infoDraw.Outline = true
+        infoDraw.OutlineColor = Color3.new(0, 0, 0)
+        infoDraw.Size = 13
+        infoDraw.Color = Color3.fromRGB(200, 255, 210)
+        infoDraw.Text = ""
+
+        espEntries[plr] = {
+            mode = "drawing",
+            nameDraw = nameDraw,
+            infoDraw = infoDraw,
+            lastInfoUpdate = 0,
+        }
+    else
+        local folder = getEspFolder()
+
+        local bb = Instance.new("BillboardGui")
+        bb.Name = "ESP_" .. plr.Name
+        bb.AlwaysOnTop = true
+        bb.Size = UDim2.new(0, 220, 0, 42)
+        bb.StudsOffset = Vector3.new(0, 3.2, 0)
+        bb.MaxDistance = math.huge
+        bb.ResetOnSpawn = false
+        bb.Enabled = false
+        bb.Parent = folder
+
+        local nameLbl = Instance.new("TextLabel")
+        nameLbl.Size = UDim2.new(1, 0, 0, 20)
+        nameLbl.Position = UDim2.new(0, 0, 0, 0)
+        nameLbl.BackgroundTransparency = 1
+        nameLbl.Text = getDisplayText(plr)
+        nameLbl.TextColor3 = getPlayerColor(plr)
+        nameLbl.TextStrokeColor3 = Color3.new(0, 0, 0)
+        nameLbl.TextStrokeTransparency = 0
+        nameLbl.TextSize = 14
+        nameLbl.Font = Enum.Font.GothamBold
+        nameLbl.Parent = bb
+
+        local infoLbl = Instance.new("TextLabel")
+        infoLbl.Size = UDim2.new(1, 0, 0, 18)
+        infoLbl.Position = UDim2.new(0, 0, 0, 20)
+        infoLbl.BackgroundTransparency = 1
+        infoLbl.Text = ""
+        infoLbl.TextColor3 = Color3.fromRGB(200, 255, 210)
+        infoLbl.TextStrokeColor3 = Color3.new(0, 0, 0)
+        infoLbl.TextStrokeTransparency = 0
+        infoLbl.TextSize = 12
+        infoLbl.Font = Enum.Font.Gotham
+        infoLbl.Parent = bb
+
+        espEntries[plr] = {
+            mode = "billboard",
+            gui = bb,
+            nameLbl = nameLbl,
+            infoLbl = infoLbl,
+            attach = nil,
+            lastInfoUpdate = 0,
+        }
+    end
+end
+
+local function formatInfoText(pos, myPos, hum, isLive)
+    local distText = myPos and (math.floor((pos - myPos).Magnitude) .. "m") or "?m"
+    local suffix = isLive and "" or " (ล่าสุด)"
+    if hum and hum.MaxHealth > 0 then
+        return string.format("[%s%s]  HP %d/%d", distText, suffix, math.floor(hum.Health), math.floor(hum.MaxHealth))
+    end
+    return string.format("[%s%s]", distText, suffix)
+end
+
+local function updateAllEsp(now)
+    local cam = workspace.CurrentCamera
+    local myChar = Player.Character
+    local myRoot = myChar and (myChar:FindFirstChild("HumanoidRootPart") or myChar:FindFirstChild("Head"))
+    local myPos = myRoot and myRoot.Position or (cam and cam.CFrame.Position) or nil
+
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= Player then
+            if not espEntries[plr] then
+                createEspForPlayer(plr)
+            end
+            local entry = espEntries[plr]
+            if entry then
+                local part, worldPos, hum, isLive = getPlayerTarget(plr)
+
+                if entry.mode == "drawing" then
+                    if worldPos and cam then
+                        local screenPos, onScreen = cam:WorldToViewportPoint(worldPos + Vector3.new(0, 3.5, 0))
+                        if onScreen and screenPos.Z > 0 then
+                            entry.nameDraw.Position = Vector2.new(screenPos.X, screenPos.Y - 14)
+                            entry.infoDraw.Position = Vector2.new(screenPos.X, screenPos.Y + 2)
+                            entry.nameDraw.Visible = true
+                            entry.infoDraw.Visible = true
+
+                            if now - entry.lastInfoUpdate >= 0.15 then
+                                entry.lastInfoUpdate = now
+                                entry.nameDraw.Color = getPlayerColor(plr)
+                                entry.nameDraw.Text = getDisplayText(plr)
+                                entry.infoDraw.Text = formatInfoText(worldPos, myPos, hum, isLive)
+                            end
+                        else
+                            entry.nameDraw.Visible = false
+                            entry.infoDraw.Visible = false
+                        end
+                    else
+                        entry.nameDraw.Visible = false
+                        entry.infoDraw.Visible = false
+                    end
+                elseif entry.gui then
+                    if part then
+                        entry.gui.Adornee = part
+                        entry.gui.Enabled = true
+                        if entry.attach then
+                            safeDestroy(entry.attach)
+                            entry.attach = nil
+                        end
+                    elseif worldPos then
+                        if not entry.attach or not entry.attach.Parent then
+                            local att = Instance.new("Attachment")
+                            att.Name = "ATT_" .. plr.Name
+                            att.Parent = getAttachFolder()
+                            entry.attach = att
+                        end
+                        entry.attach.WorldPosition = worldPos
+                        entry.gui.Adornee = entry.attach
+                        entry.gui.Enabled = true
+                    else
+                        entry.gui.Adornee = nil
+                        entry.gui.Enabled = false
+                    end
+
+                    if (part or worldPos) and (now - entry.lastInfoUpdate >= 0.15) then
+                        entry.lastInfoUpdate = now
+                        entry.nameLbl.TextColor3 = getPlayerColor(plr)
+                        entry.infoLbl.Text = formatInfoText(worldPos, myPos, hum, isLive)
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function stopESP()
+    isEspEnabled = false
+    if espLoop then espLoop:Disconnect(); espLoop = nil end
+    for plr, _ in pairs(espEntries) do
+        removeEspForPlayer(plr)
+    end
+    if espFolder then
+        safeDestroy(espFolder)
+        espFolder = nil
+    end
+    if espAttachFolder then
+        safeDestroy(espAttachFolder)
+        espAttachFolder = nil
+    end
+end
+
+local function startESP()
+    stopESP()
+    isEspEnabled = true
+    if not hasDrawing then
+        getEspFolder()
+    end
+
+    for _, plr in ipairs(Players:GetPlayers()) do
+        createEspForPlayer(plr)
+    end
+    updateAllEsp(os.clock())
+
+    if hasDrawing then
+        -- Drawing ต้องอัปเดตตำแหน่งหน้าจอทุกเฟรมเพื่อความลื่น
+        espLoop = RunService.RenderStepped:Connect(function()
+            if not isEspEnabled then return end
+            updateAllEsp(os.clock())
+        end)
+    else
+        local elapsed = 0
+        espLoop = RunService.Heartbeat:Connect(function(dt)
+            if not isEspEnabled then return end
+            elapsed = elapsed + dt
+            if elapsed < 0.1 then return end
+            elapsed = 0
+            updateAllEsp(os.clock())
+        end)
+    end
+end
+
+trackConn(Players.PlayerAdded:Connect(function(plr)
+    if isEspEnabled then
+        createEspForPlayer(plr)
+    end
+end))
+
+trackConn(Players.PlayerRemoving:Connect(function(plr)
+    removeEspForPlayer(plr)
+end))
+
+
+local function removeFlyMovers()
+    if flyBV then safeDestroy(flyBV); flyBV = nil end
+    if flyBG then safeDestroy(flyBG); flyBG = nil end
+end
+
+local function syncFlyUI()
+    if not uiRefs.flyBtn then return end
+    if isFlying then
+        uiRefs.flyBtn.Text = "⏹️  ปิดบินอิสระ (RShift)"
+        uiRefs.flyBtn.BackgroundColor3 = Color3.fromRGB(200, 70, 70)
+    else
+        uiRefs.flyBtn.Text = "🕊️  บินอิสระตัวละคร: ปิด (RShift)"
+        uiRefs.flyBtn.BackgroundColor3 = Color3.fromRGB(90, 60, 160)
+    end
+end
+
+local function stopFly()
+    isFlying = false
+    if flyLoop then flyLoop:Disconnect(); flyLoop = nil end
+    removeFlyMovers()
+
+    local char = Player.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        pcall(function()
+            hum.PlatformStand = false
+            hum:ChangeState(Enum.HumanoidStateType.Freefall)
+        end)
+    end
+    syncFlyUI()
+    if uiRefs.status and not isEnabled then
+        uiRefs.status.Text = "⏸️  สถานะ: ปิดอยู่"
+        uiRefs.status.TextColor3 = Color3.fromRGB(255, 180, 80)
+    end
+end
+
+local function createFlyMovers(root)
+    removeFlyMovers()
+    for _, c in ipairs(root:GetChildren()) do
+        if c.Name == "AB_FlyBV" or c.Name == "AB_FlyBG" then
+            safeDestroy(c)
         end
     end
 
-    return tools
+    flyBV = Instance.new("BodyVelocity")
+    flyBV.Name = "AB_FlyBV"
+    flyBV.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+    flyBV.Velocity = Vector3.new(0, 0, 0)
+    flyBV.P = 5000
+    flyBV.Parent = root
+
+    flyBG = Instance.new("BodyGyro")
+    flyBG.Name = "AB_FlyBG"
+    flyBG.MaxTorque = Vector3.new(9e9, 9e9, 9e9)
+    flyBG.P = 10000
+    flyBG.D = 500
+    flyBG.CFrame = root.CFrame
+    flyBG.Parent = root
 end
 
--- =====================================================
--- Function : Equip Tool ที่เลือก
--- =====================================================
-local function EquipTool(toolName)
-    local character = player.Character or player.CharacterAdded:Wait()
-    local backpack = player.Backpack
-
-    local tool = backpack:FindFirstChild(toolName)
-    if tool then
-        tool.Parent = character
+local function startFly()
+    local char = Player.Character
+    local root = char and (char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Torso") or char:FindFirstChild("UpperTorso"))
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not root or not hum or hum.Health <= 0 then
+        return false
     end
+
+    -- หยุดขับเรือก่อนถ้ากำลังเปิดอยู่ (กันแย่งควบคุมกัน)
+    if isEnabled then
+        stopSystem()
+        if uiRefs.tog then
+            uiRefs.tog.Text = "🎮  เปิดระบบขับเรือ (WASD)"
+            uiRefs.tog.BackgroundColor3 = Color3.fromRGB(0, 140, 75)
+        end
+        if uiRefs.ad then
+            uiRefs.ad.Text = "🧭  Auto Drive (ตรงไปอัตโนมัติ)"
+            uiRefs.ad.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
+        end
+    end
+    if hum.SeatPart then
+        hum.Sit = false
+        task.wait(0.05)
+    end
+
+    stopFly()
+    isFlying = true
+
+    createFlyMovers(root)
+    hum.PlatformStand = true
+    syncFlyUI()
+    if uiRefs.status then
+        uiRefs.status.Text = "🕊️  กำลังบิน (WASD + Space/LCtrl)"
+        uiRefs.status.TextColor3 = Color3.fromRGB(190, 150, 255)
+    end
+
+    flyLoop = RunService.RenderStepped:Connect(function()
+        if not isFlying then
+            stopFly()
+            return
+        end
+
+        local c = Player.Character
+        local r = c and (c:FindFirstChild("HumanoidRootPart") or c:FindFirstChild("Torso") or c:FindFirstChild("UpperTorso"))
+        local h = c and c:FindFirstChildOfClass("Humanoid")
+        if not r or not h or h.Health <= 0 or h.SeatPart then
+            stopFly()
+            return
+        end
+
+        if not flyBV or flyBV.Parent ~= r or not flyBG or flyBG.Parent ~= r then
+            createFlyMovers(r)
+        end
+
+        h.PlatformStand = true
+
+        local cam = workspace.CurrentCamera
+        if not cam then return end
+        local camCF = cam.CFrame
+
+        local moveDir = Vector3.new(0, 0, 0)
+        if pressing(Enum.KeyCode.W) then moveDir = moveDir + camCF.LookVector end
+        if pressing(Enum.KeyCode.S) then moveDir = moveDir - camCF.LookVector end
+        if pressing(Enum.KeyCode.D) then moveDir = moveDir + camCF.RightVector end
+        if pressing(Enum.KeyCode.A) then moveDir = moveDir - camCF.RightVector end
+        if pressing(Enum.KeyCode.Space) then moveDir = moveDir + Vector3.new(0, 1, 0) end
+        if pressing(Enum.KeyCode.LeftControl) then moveDir = moveDir - Vector3.new(0, 1, 0) end
+
+        if moveDir.Magnitude > 0 then
+            flyBV.Velocity = moveDir.Unit * flySpeed
+        else
+            flyBV.Velocity = Vector3.new(0, 0, 0)
+        end
+
+        local lookXZ = Vector3.new(camCF.LookVector.X, 0, camCF.LookVector.Z)
+        if lookXZ.Magnitude > 0.01 then
+            flyBG.CFrame = CFrame.lookAt(Vector3.new(0, 0, 0), lookXZ)
+        end
+    end)
+
+    return true
 end
+
+-- ============================================
+-- GUI
+-- ============================================
+local function buildGUI()
+    local parent = guiParent()
+    local old = parent:FindFirstChild("AutoBoatGUI")
+    if old then old:Destroy() end
+
+    local sg = Instance.new("ScreenGui")
+    sg.Name = "AutoBoatGUI"
+    sg.ResetOnSpawn = false
+    sg.Parent = parent
+
+    local main = Instance.new("Frame")
+    main.Name = "Main"
+    main.Size = UDim2.new(0, 300, 0, 566)
+    main.Position = UDim2.new(0, 20, 0.5, -283)
+    main.BackgroundColor3 = Color3.fromRGB(15, 18, 30)
+    main.BorderSizePixel = 0
+    main.Active = true
+    main.Draggable = true
+    main.Parent = sg
+    Instance.new("UICorner", main).CornerRadius = UDim.new(0, 12)
+
+    local mst = Instance.new("UIStroke")
+    mst.Color = Color3.fromRGB(0, 180, 110)
+    mst.Thickness = 1.5
+    mst.Transparency = 0.3
+    mst.Parent = main
+
+    -- Title
+    local tb = Instance.new("Frame")
+    tb.Size = UDim2.new(1, 0, 0, 40)
+    tb.BackgroundColor3 = Color3.fromRGB(0, 130, 75)
+    tb.BorderSizePixel = 0
+    tb.Parent = main
+    Instance.new("UICorner", tb).CornerRadius = UDim.new(0, 12)
+    local tbf = Instance.new("Frame")
+    tbf.Size = UDim2.new(1, 0, 0, 14)
+    tbf.Position = UDim2.new(0, 0, 1, -14)
+    tbf.BackgroundColor3 = Color3.fromRGB(0, 130, 75)
+    tbf.BorderSizePixel = 0
+    tbf.Parent = tb
+    local tl = Instance.new("TextLabel")
+    tl.Size = UDim2.new(1, 0, 1, 0)
+    tl.BackgroundTransparency = 1
+    tl.Text = "🚢  Auto Boat v4.1 + Fly + ESP"
+    tl.TextColor3 = Color3.new(1, 1, 1)
+    tl.TextSize = 14
+    tl.Font = Enum.Font.GothamBold
+    tl.Parent = tb
+
+    local function section(text, py)
+        local bg2 = Instance.new("Frame")
+        bg2.Size = UDim2.new(1, -24, 0, 18)
+        bg2.Position = UDim2.new(0, 12, 0, py)
+        bg2.BackgroundColor3 = Color3.fromRGB(25, 30, 50)
+        bg2.BorderSizePixel = 0
+        bg2.Parent = main
+        Instance.new("UICorner", bg2).CornerRadius = UDim.new(0, 6)
+        local l = Instance.new("TextLabel")
+        l.Size = UDim2.new(1, -10, 1, 0)
+        l.Position = UDim2.new(0, 10, 0, 0)
+        l.BackgroundTransparency = 1
+        l.Text = text
+        l.TextColor3 = Color3.fromRGB(160, 190, 255)
+        l.TextSize = 11
+        l.Font = Enum.Font.GothamBold
+        l.TextXAlignment = Enum.TextXAlignment.Left
+        l.Parent = bg2
+    end
+
+    local function valBox(py)
+        local l = Instance.new("TextLabel")
+        l.Size = UDim2.new(0, 90, 0, 26)
+        l.Position = UDim2.new(1, -105, 0, py)
+        l.BackgroundColor3 = Color3.fromRGB(20, 25, 45)
+        l.TextColor3 = Color3.fromRGB(80, 255, 170)
+        l.TextSize = 14
+        l.Font = Enum.Font.GothamBold
+        l.Parent = main
+        Instance.new("UICorner", l).CornerRadius = UDim.new(0, 6)
+        local vs = Instance.new("UIStroke")
+        vs.Color = Color3.fromRGB(80, 255, 170)
+        vs.Thickness = 1
+        vs.Transparency = 0.7
+        vs.Parent = l
+        return l
+    end
+
+    local function mbtn(text, px, py, sx, col)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(0, sx, 0, 26)
+        b.Position = UDim2.new(0, px, 0, py)
+        b.BackgroundColor3 = col
+        b.Text = text
+        b.TextColor3 = Color3.new(1, 1, 1)
+        b.TextSize = 13
+        b.Font = Enum.Font.GothamBold
+        b.Selectable = false
+        b.Parent = main
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 8)
+        return b
+    end
+
+    local r1 = Color3.fromRGB(180, 50, 50)
+    local r2 = Color3.fromRGB(130, 30, 30)
+    local g1 = Color3.fromRGB(40, 160, 70)
+    local g2 = Color3.fromRGB(25, 120, 45)
+
+
+    section("⚡  ความเร็วเรือ", 48)
+    local spdV = valBox(70)
+    spdV.Text = tostring(boatSpeed)
+    local function setSpd(v) boatSpeed = math.clamp(v, 10, 2000); spdV.Text = tostring(boatSpeed) end
+    mbtn("−", 12, 70, 36, r1).MouseButton1Click:Connect(function() setSpd(boatSpeed - 10) end)
+    mbtn("−50", 53, 70, 42, r2).MouseButton1Click:Connect(function() setSpd(boatSpeed - 50) end)
+    mbtn("+", 100, 70, 36, g1).MouseButton1Click:Connect(function() setSpd(boatSpeed + 10) end)
+    mbtn("+50", 141, 70, 42, g2).MouseButton1Click:Connect(function() setSpd(boatSpeed + 50) end)
+
+
+    section("📏  ความสูงเรือ (Q ขึ้น / E ลง)", 104)
+    local hgtV = valBox(126)
+    hgtV.Text = tostring(math.floor(boatHeight))
+    local function setHgt(v) boatHeight = math.clamp(v, -50, 5000); hgtV.Text = tostring(math.floor(boatHeight)) end
+    mbtn("−", 12, 126, 36, r1).MouseButton1Click:Connect(function() setHgt(boatHeight - 10) end)
+    mbtn("−50", 53, 126, 42, r2).MouseButton1Click:Connect(function() setHgt(boatHeight - 50) end)
+    mbtn("+", 100, 126, 36, g1).MouseButton1Click:Connect(function() setHgt(boatHeight + 10) end)
+    mbtn("+50", 141, 126, 42, g2).MouseButton1Click:Connect(function() setHgt(boatHeight + 50) end)
+
+
+    section("🔄  ความเร็วเลี้ยว", 160)
+    local trnV = valBox(182)
+    trnV.Text = string.format("%.1f", turnSpeed)
+    local function setTrn(v) turnSpeed = math.clamp(v, 0.5, 8); trnV.Text = string.format("%.1f", turnSpeed) end
+    mbtn("−", 12, 182, 55, r1).MouseButton1Click:Connect(function() setTrn(turnSpeed - 0.5) end)
+    mbtn("+", 72, 182, 55, g1).MouseButton1Click:Connect(function() setTrn(turnSpeed + 0.5) end)
+
+  
+    section("🕊️  ความเร็วบินตัวละคร", 216)
+    local flyV = valBox(238)
+    flyV.Text = tostring(flySpeed)
+    local function setFlySpd(v) flySpeed = math.clamp(v, 20, 1000); flyV.Text = tostring(flySpeed) end
+    mbtn("−", 12, 238, 36, r1).MouseButton1Click:Connect(function() setFlySpd(flySpeed - 10) end)
+    mbtn("−50", 53, 238, 42, r2).MouseButton1Click:Connect(function() setFlySpd(flySpeed - 50) end)
+    mbtn("+", 100, 238, 36, g1).MouseButton1Click:Connect(function() setFlySpd(flySpeed + 10) end)
+    mbtn("+50", 141, 238, 42, g2).MouseButton1Click:Connect(function() setFlySpd(flySpeed + 50) end)
+
+    task.spawn(function()
+        while main.Parent do
+            hgtV.Text = tostring(math.floor(boatHeight))
+            task.wait(0.2)
+        end
+    end)
+
+    local status = Instance.new("TextLabel")
+    status.Size = UDim2.new(1, -24, 0, 20)
+    status.Position = UDim2.new(0, 12, 0, 272)
+    status.BackgroundTransparency = 1
+    status.Text = "⏸️  สถานะ: ปิดอยู่"
+    status.TextColor3 = Color3.fromRGB(255, 180, 80)
+    status.TextSize = 12
+    status.Font = Enum.Font.GothamBold
+    status.TextXAlignment = Enum.TextXAlignment.Left
+    status.Parent = main
+
+   
+    local tog = Instance.new("TextButton")
+    tog.Size = UDim2.new(1, -24, 0, 36)
+    tog.Position = UDim2.new(0, 12, 0, 298)
+    tog.BackgroundColor3 = Color3.fromRGB(0, 140, 75)
+    tog.Text = "🎮  เปิดระบบขับเรือ (WASD)"
+    tog.TextColor3 = Color3.new(1, 1, 1)
+    tog.TextSize = 13
+    tog.Font = Enum.Font.GothamBold
+    tog.Selectable = false
+    tog.Parent = main
+    Instance.new("UICorner", tog).CornerRadius = UDim.new(0, 9)
+
+    -- Auto Drive
+    local ad = Instance.new("TextButton")
+    ad.Size = UDim2.new(1, -24, 0, 36)
+    ad.Position = UDim2.new(0, 12, 0, 340)
+    ad.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
+    ad.Text = "🧭  Auto Drive (ตรงไปอัตโนมัติ)"
+    ad.TextColor3 = Color3.fromRGB(200, 200, 220)
+    ad.TextSize = 13
+    ad.Font = Enum.Font.GothamBold
+    ad.Selectable = false
+    ad.Parent = main
+    Instance.new("UICorner", ad).CornerRadius = UDim.new(0, 9)
+
+ 
+    local flyBtn = Instance.new("TextButton")
+    flyBtn.Size = UDim2.new(1, -24, 0, 36)
+    flyBtn.Position = UDim2.new(0, 12, 0, 382)
+    flyBtn.BackgroundColor3 = Color3.fromRGB(90, 60, 160)
+    flyBtn.Text = "🕊️  บินอิสระตัวละคร: ปิด (RShift)"
+    flyBtn.TextColor3 = Color3.new(1, 1, 1)
+    flyBtn.TextSize = 13
+    flyBtn.Font = Enum.Font.GothamBold
+    flyBtn.Selectable = false
+    flyBtn.Parent = main
+    Instance.new("UICorner", flyBtn).CornerRadius = UDim.new(0, 9)
+
+    -- ESP ชื่อผู้เล่น
+    local espBtn = Instance.new("TextButton")
+    espBtn.Size = UDim2.new(1, -24, 0, 36)
+    espBtn.Position = UDim2.new(0, 12, 0, 424)
+    espBtn.BackgroundColor3 = Color3.fromRGB(45, 55, 85)
+    espBtn.Text = "👁️  ESP ชื่อผู้เล่น: ปิด"
+    espBtn.TextColor3 = Color3.fromRGB(200, 220, 255)
+    espBtn.TextSize = 13
+    espBtn.Font = Enum.Font.GothamBold
+    espBtn.Selectable = false
+    espBtn.Parent = main
+    Instance.new("UICorner", espBtn).CornerRadius = UDim.new(0, 9)
+
+    uiRefs.tog = tog
+    uiRefs.ad = ad
+    uiRefs.flyBtn = flyBtn
+    uiRefs.espBtn = espBtn
+    uiRefs.status = status
+
+    tog.MouseButton1Click:Connect(function()
+        if isEnabled then
+            stopSystem()
+            tog.Text = "🎮  เปิดระบบขับเรือ (WASD)"
+            tog.BackgroundColor3 = Color3.fromRGB(0, 140, 75)
+            ad.Text = "🧭  Auto Drive (ตรงไปอัตโนมัติ)"
+            ad.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
+            status.Text = "⏸️  สถานะ: ปิดอยู่"
+            status.TextColor3 = Color3.fromRGB(255, 180, 80)
+        else
+            if isFlying then stopFly() end
+            if startSystem() then
+                tog.Text = "⏹️  ปิดระบบ"
+                tog.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+                status.Text = "🎮  WASD ขับ | A/D เลี้ยว | Q/E สูงต่ำ"
+                status.TextColor3 = Color3.fromRGB(80, 255, 150)
+            else
+                status.Text = "❌  นั่งเรือก่อน!"
+                status.TextColor3 = Color3.fromRGB(255, 80, 80)
+            end
+        end
+    end)
+
+    ad.MouseButton1Click:Connect(function()
+        if not isEnabled then
+            status.Text = "❌  เปิดระบบขับก่อน!"
+            status.TextColor3 = Color3.fromRGB(255, 80, 80)
+            return
+        end
+        isAutoDrive = not isAutoDrive
+        if isAutoDrive then
+            ad.Text = "⏹️  ปิด Auto Drive"
+            ad.BackgroundColor3 = Color3.fromRGB(200, 130, 0)
+            status.Text = "🧭  Auto ON | A/D เลี้ยวได้"
+            status.TextColor3 = Color3.fromRGB(255, 220, 80)
+        else
+            ad.Text = "🧭  Auto Drive (ตรงไปอัตโนมัติ)"
+            ad.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
+            status.Text = "🎮  WASD ขับ | A/D เลี้ยว | Q/E สูงต่ำ"
+            status.TextColor3 = Color3.fromRGB(80, 255, 150)
+        end
+    end)
+
+    flyBtn.MouseButton1Click:Connect(function()
+        if isFlying then
+            stopFly()
+        else
+            if not startFly() then
+                status.Text = "❌  ไม่พบตัวละคร!"
+                status.TextColor3 = Color3.fromRGB(255, 80, 80)
+            end
+        end
+    end)
+
+    espBtn.MouseButton1Click:Connect(function()
+        if isEspEnabled then
+            stopESP()
+            espBtn.Text = "👁️  ESP ชื่อผู้เล่น: ปิด"
+            espBtn.BackgroundColor3 = Color3.fromRGB(45, 55, 85)
+            espBtn.TextColor3 = Color3.fromRGB(200, 220, 255)
+        else
+            startESP()
+            espBtn.Text = "👁️  ESP ชื่อผู้เล่น: เปิดอยู่"
+            espBtn.BackgroundColor3 = Color3.fromRGB(35, 115, 200)
+            espBtn.TextColor3 = Color3.new(1, 1, 1)
+        end
+    end)
+
+    -- คีย์ลัด
+    local kb = Instance.new("Frame")
+    kb.Size = UDim2.new(1, -24, 0, 88)
+    kb.Position = UDim2.new(0, 12, 0, 468)
+    kb.BackgroundColor3 = Color3.fromRGB(20, 24, 40)
+    kb.BorderSizePixel = 0
+    kb.Parent = main
+    Instance.new("UICorner", kb).CornerRadius = UDim.new(0, 8)
+    local kbs = Instance.new("UIStroke")
+    kbs.Color = Color3.fromRGB(60, 70, 100)
+    kbs.Thickness = 1
+    kbs.Parent = kb
+    local kt = Instance.new("TextLabel")
+    kt.Size = UDim2.new(1, -16, 1, -8)
+    kt.Position = UDim2.new(0, 8, 0, 4)
+    kt.BackgroundTransparency = 1
+    kt.Text = "⌨️  ปุ่มควบคุม:\n"
+        .. "   เรือ: WASD ขับ | Q/E ขึ้น-ลง\n"
+        .. "   บิน: WASD ตามกล้อง | Space/LCtrl ขึ้น-ลง\n"
+        .. "   Right Shift = เปิด/ปิดบิน\n"
+        .. "   Right Ctrl = ซ่อน/แสดง GUI"
+    kt.TextColor3 = Color3.fromRGB(140, 155, 190)
+    kt.TextSize = 11
+    kt.Font = Enum.Font.Gotham
+    kt.TextXAlignment = Enum.TextXAlignment.Left
+    kt.TextYAlignment = Enum.TextYAlignment.Top
+    kt.Parent = kb
+end
+
+trackConn(UIS.InputBegan:Connect(function(input, gpe)
+    if gpe or UIS:GetFocusedTextBox() then return end
+    if input.KeyCode == Enum.KeyCode.RightControl then
+        local g = guiParent():FindFirstChild("AutoBoatGUI")
+        if g then g.Enabled = not g.Enabled end
+    elseif input.KeyCode == Enum.KeyCode.RightShift then
+        if isFlying then
+            stopFly()
+        else
+            startFly()
+        end
+    end
+end))
+
+trackConn(Player.CharacterAdded:Connect(function()
+    task.wait(1)
+    stopSystem()
+    stopFly()
+end))
+
+pcall(function()
+    if getgenv then
+        getgenv().AB_Cleanup = function()
+            stopSystem()
+            stopFly()
+            stopESP()
+            for _, c in ipairs(globalConns) do
+                pcall(function() c:Disconnect() end)
+            end
+            table.clear(globalConns)
+            local g = guiParent():FindFirstChild("AutoBoatGUI")
+            if g then g:Destroy() end
+        end
+    end
+end)
+
+buildGUI()
+print("=============================================")
+print("  🚢 Auto Boat v4.1 + Fly + ESP Loaded!")
+print("  ✅ ขับเรือ v4.1 + บินอิสระ + ESP")
+print("  🎮 RShift บิน | RCtrl ซ่อน GUI")
+print("=============================================")
